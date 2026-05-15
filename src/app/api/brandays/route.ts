@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import sharp from "sharp";
+import { createCanvas, loadImage } from "canvas";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
 import { pdfSivuKuvaksi } from "@/lib/pdf";
 
@@ -183,16 +184,84 @@ function hex2rgb(hex: string): { r: number; g: number; b: number } {
   };
 }
 
-function luoFooterSVG(leveys: number, korkeus: number, brandi: BrandiAsetukset): string {
+async function luoFooterCanvas(
+  leveys: number,
+  korkeus: number,
+  brandi: BrandiAsetukset
+): Promise<Buffer> {
+  const canvas = createCanvas(leveys, korkeus);
+  const ctx = canvas.getContext("2d");
+
+  // Tausta
+  ctx.fillStyle = brandi.ensisijainenVari;
+  ctx.fillRect(0, 0, leveys, korkeus);
+
+  // Vasen korostusraita
+  ctx.fillStyle = brandi.toissijaineVari;
+  ctx.fillRect(0, 0, 6, korkeus);
+
+  // Varataan logotila oikeaan reunaan
+  const logoAlue = brandi.logo ? Math.round(leveys * 0.20) : 0;
+  const tekstiMaxX = leveys - logoAlue - 20;
+
+  ctx.fillStyle = brandi.tekstiVari;
+
+  // Yrityksen nimi
+  const nimiKoko = Math.round(korkeus * 0.36);
+  ctx.font = `bold ${nimiKoko}px Arial`;
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.fillText(brandi.yritysNimi || "Kiinteistövälitys", 20, Math.round(korkeus * 0.47));
+
+  // Slogan
+  if (brandi.slogan) {
+    const sloganKoko = Math.round(korkeus * 0.22);
+    ctx.font = `${sloganKoko}px Arial`;
+    ctx.globalAlpha = 0.8;
+    ctx.fillText(brandi.slogan, 20, Math.round(korkeus * 0.77));
+    ctx.globalAlpha = 1;
+  }
+
+  // Yhteystiedot (oikea puoli, logon vasemmalle puolelle)
   const yhteystiedot = [brandi.puhelinnumero, brandi.sahkoposti, brandi.verkkosivusto]
     .filter(Boolean).join("  |  ");
-  return `<svg width="${leveys}" height="${korkeus}" xmlns="http://www.w3.org/2000/svg">
-    <rect width="${leveys}" height="${korkeus}" fill="${brandi.ensisijainenVari}"/>
-    <rect x="0" y="0" width="6" height="${korkeus}" fill="${brandi.toissijaineVari}"/>
-    <text x="20" y="${korkeus * 0.42}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.32)}px" font-weight="bold" fill="${brandi.tekstiVari}">${brandi.yritysNimi || "Kiinteistövälitys"}</text>
-    ${brandi.slogan ? `<text x="20" y="${korkeus * 0.72}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.2)}px" fill="${brandi.tekstiVari}" opacity="0.8">${brandi.slogan}</text>` : ""}
-    ${yhteystiedot ? `<text x="${leveys - 20}" y="${korkeus * 0.55}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.18)}px" fill="${brandi.tekstiVari}" opacity="0.85" text-anchor="end">${yhteystiedot}</text>` : ""}
-  </svg>`;
+  if (yhteystiedot) {
+    const yhteysKoko = Math.round(korkeus * 0.19);
+    ctx.font = `${yhteysKoko}px Arial`;
+    ctx.textAlign = "right";
+    ctx.globalAlpha = 0.85;
+    ctx.fillText(yhteystiedot, tekstiMaxX, Math.round(korkeus * 0.58));
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  }
+
+  // Logo oikeaan alakulmaan footerin sisälle
+  if (brandi.logo) {
+    try {
+      const logoBase64 = brandi.logo.split(",")[1];
+      const logoBuffer = Buffer.from(logoBase64, "base64");
+      const logoMaxH = Math.round(korkeus * 0.72);
+      const logoMaxW = Math.round(logoAlue * 0.88);
+
+      const logoResized = await sharp(logoBuffer)
+        .resize(logoMaxW, logoMaxH, { fit: "inside", withoutEnlargement: true })
+        .png()
+        .toBuffer();
+
+      const logoMeta = await sharp(logoResized).metadata();
+      const lw = logoMeta.width  ?? logoMaxW;
+      const lh = logoMeta.height ?? logoMaxH;
+
+      const logoImg = await loadImage(logoResized);
+      const logoX = leveys - lw - 14;
+      const logoY = Math.round((korkeus - lh) / 2);
+      ctx.drawImage(logoImg, logoX, logoY, lw, lh);
+    } catch (logoErr) {
+      console.error("Logo-piirto epäonnistui:", logoErr);
+    }
+  }
+
+  return canvas.toBuffer("image/png") as Buffer;
 }
 
 function luoReunusSVG(leveys: number, korkeus: number, vari: string): string {
@@ -253,39 +322,16 @@ export async function POST(req: NextRequest) {
     tyoBuffer = await vaihdaseinatVari(tyoBuffer, brandi.ensisijainenVari);
 
     // ── Vaihe 5: Footer + reunus + logo ──────────────────────────────────────
-    const footerKorkeus = Math.min(120, Math.max(60, analyysi.pohjakuva.suositeltuFooterKorkeus));
+    const footerKorkeus = Math.min(120, Math.max(70, analyysi.pohjakuva.suositeltuFooterKorkeus));
     const uusiKorkeus   = korkeus + footerKorkeus;
 
+    // Footer canvas-pohjaisena (ratkaisee fontti- ja logo-ongelmat)
+    const footerBuffer = await luoFooterCanvas(leveys, footerKorkeus, brandi);
+
     const composites: sharp.OverlayOptions[] = [
-      { input: Buffer.from(luoFooterSVG(leveys, footerKorkeus, brandi)), top: korkeus, left: 0 },
+      { input: footerBuffer, top: korkeus, left: 0 },
       { input: Buffer.from(luoReunusSVG(leveys, uusiKorkeus, brandi.toissijaineVari)), top: 0, left: 0 },
     ];
-
-    // Logo footeriin
-    if (brandi.logo) {
-      try {
-        const logoBase64 = brandi.logo.split(",")[1];
-        const logoBuffer = Buffer.from(logoBase64, "base64");
-        const logoMaxH   = Math.round(footerKorkeus * 0.75);
-        const logoMaxW   = Math.round(leveys * 0.15);
-
-        const logoResized = await sharp(logoBuffer)
-          .resize(logoMaxW, logoMaxH, { fit: "inside", withoutEnlargement: true })
-          .png().toBuffer();
-
-        const logoMeta = await sharp(logoResized).metadata();
-        const lw = logoMeta.width  ?? logoMaxW;
-        const lh = logoMeta.height ?? logoMaxH;
-
-        composites.push({
-          input: logoResized,
-          top:  korkeus + Math.round((footerKorkeus - lh) / 2),
-          left: leveys - lw - 16,
-        });
-      } catch (logoErr) {
-        console.error("Logo-käsittely epäonnistui:", logoErr);
-      }
-    }
 
     // ── Vaihe 6: Kokoa lopullinen kuva ───────────────────────────────────────
     const lopullinen = await sharp({
