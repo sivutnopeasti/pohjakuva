@@ -7,13 +7,20 @@ import { join } from "path";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
 import { pdfSivuKuvaksi } from "@/lib/pdf";
 
-// Ladataan fontit kerran käynnistyksessä
-const fontRegular = readFileSync(
+// Ladataan fontit kerran moduulin käynnistyessä
+const _fontRegularBuf = readFileSync(
   join(process.cwd(), "node_modules/roboto-fontface/fonts/roboto/Roboto-Regular.woff")
 );
-const fontBold = readFileSync(
+const _fontBoldBuf = readFileSync(
   join(process.cwd(), "node_modules/roboto-fontface/fonts/roboto/Roboto-Bold.woff")
 );
+// Muunnetaan ArrayBufferiksi (Satori-vaatimus) – tehdään kerran, ei joka kutsulla
+const fontRegular = _fontRegularBuf.buffer.slice(
+  _fontRegularBuf.byteOffset, _fontRegularBuf.byteOffset + _fontRegularBuf.byteLength
+) as ArrayBuffer;
+const fontBold = _fontBoldBuf.buffer.slice(
+  _fontBoldBuf.byteOffset, _fontBoldBuf.byteOffset + _fontBoldBuf.byteLength
+) as ArrayBuffer;
 
 export const maxDuration = 60;
 
@@ -228,7 +235,107 @@ async function luoFooterSatori(
     }
   }
 
-  // Satori-layout: flex row, vasen teksti + oikea logo
+  // Satori vaatii display:"flex" KAIKILLE div:ille joilla on lapsia
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tekstiLapset: any[] = [
+    {
+      type: "div",
+      props: {
+        style: {
+          display: "flex",
+          fontSize: Math.round(korkeus * 0.36),
+          fontWeight: 700,
+          color: brandi.tekstiVari,
+          fontFamily: "Roboto",
+          lineHeight: 1.2,
+        },
+        children: [nimi],
+      },
+    },
+  ];
+
+  if (brandi.slogan) {
+    tekstiLapset.push({
+      type: "div",
+      props: {
+        style: {
+          display: "flex",
+          fontSize: Math.round(korkeus * 0.22),
+          fontWeight: 400,
+          color: brandi.tekstiVari,
+          fontFamily: "Roboto",
+          opacity: 0.8,
+        },
+        children: [brandi.slogan],
+      },
+    });
+  }
+
+  if (yhteystiedot) {
+    tekstiLapset.push({
+      type: "div",
+      props: {
+        style: {
+          display: "flex",
+          fontSize: Math.round(korkeus * 0.18),
+          fontWeight: 400,
+          color: brandi.tekstiVari,
+          fontFamily: "Roboto",
+          opacity: 0.75,
+          marginTop: 2,
+        },
+        children: [yhteystiedot],
+      },
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rivityLapset: any[] = [
+    // Tekstialue
+    {
+      type: "div",
+      props: {
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          paddingLeft: 20,
+          flex: 1,
+          height: korkeus,
+          gap: 4,
+        },
+        children: tekstiLapset,
+      },
+    },
+  ];
+
+  if (logoDataUri) {
+    rivityLapset.push({
+      type: "div",
+      props: {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          paddingRight: 16,
+          height: korkeus,
+          flexShrink: 0,
+        },
+        children: [
+          {
+            type: "img",
+            props: {
+              src: logoDataUri,
+              width: logoLeveys,
+              height: logoKorkeus2,
+              style: { objectFit: "contain" },
+            },
+          },
+        ],
+      },
+    });
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const layout: any = {
     type: "div",
@@ -240,107 +347,10 @@ async function luoFooterSatori(
         width: leveys,
         height: korkeus,
         backgroundColor: brandi.ensisijainenVari,
-        position: "relative",
+        borderLeft: `6px solid ${brandi.toissijaineVari}`,
         overflow: "hidden",
       },
-      children: [
-        // Vasen korostusraita
-        {
-          type: "div",
-          props: {
-            style: {
-              position: "absolute",
-              left: 0, top: 0,
-              width: 6,
-              height: korkeus,
-              backgroundColor: brandi.toissijaineVari,
-            },
-            children: [],
-          },
-        },
-        // Tekstit
-        {
-          type: "div",
-          props: {
-            style: {
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "center",
-              paddingLeft: 20,
-              flex: 1,
-              height: korkeus,
-              gap: 4,
-            },
-            children: [
-              {
-                type: "div",
-                props: {
-                  style: {
-                    fontSize: Math.round(korkeus * 0.36),
-                    fontWeight: 700,
-                    color: brandi.tekstiVari,
-                    fontFamily: "Roboto",
-                    lineHeight: 1.2,
-                  },
-                  children: [nimi],
-                },
-              },
-              brandi.slogan ? {
-                type: "div",
-                props: {
-                  style: {
-                    fontSize: Math.round(korkeus * 0.22),
-                    fontWeight: 400,
-                    color: brandi.tekstiVari,
-                    fontFamily: "Roboto",
-                    opacity: 0.8,
-                  },
-                  children: [brandi.slogan],
-                },
-              } : null,
-              yhteystiedot ? {
-                type: "div",
-                props: {
-                  style: {
-                    fontSize: Math.round(korkeus * 0.18),
-                    fontWeight: 400,
-                    color: brandi.tekstiVari,
-                    fontFamily: "Roboto",
-                    opacity: 0.75,
-                    marginTop: 2,
-                  },
-                  children: [yhteystiedot],
-                },
-              } : null,
-            ].filter(Boolean),
-          },
-        },
-        // Logo oikeaan reunaan
-        logoDataUri ? {
-          type: "div",
-          props: {
-            style: {
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              paddingRight: 16,
-              height: korkeus,
-              flexShrink: 0,
-            },
-            children: [
-              {
-                type: "img",
-                props: {
-                  src: logoDataUri,
-                  width: logoLeveys,
-                  height: logoKorkeus2,
-                  style: { objectFit: "contain" },
-                },
-              },
-            ],
-          },
-        } : null,
-      ].filter(Boolean),
+      children: rivityLapset,
     },
   };
 
@@ -349,7 +359,7 @@ async function luoFooterSatori(
     height: korkeus,
     fonts: [
       { name: "Roboto", data: fontRegular, weight: 400, style: "normal" },
-      { name: "Roboto", data: fontBold,    weight: 700, style: "normal" },
+      { name: "Roboto", data: fontBold,   weight: 700, style: "normal" },
     ],
   });
 
