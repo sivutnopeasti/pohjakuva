@@ -58,15 +58,16 @@ export default function BrandaysSivu() {
   async function kaynnistaEdistyminen() {
     const vaiheet = [
       "Tarkistetaan kuvanlaatu tekoälyllä...",
-      "Tunnistetaan seinät, huoneet ja mitat...",
       "Parannetaan kuvanlaatua tarvittaessa...",
-      "Vaihdetaan seinien väri brändiväriksi...",
+      "Analysoidaan huoneet, seinät ja oviaukot...",
+      "Piirretään pohjakuva uudelleen (tämä vie hetken)...",
+      "Lisätään ovikaaret, ikkunat ja kalusteet...",
       "Lisätään footer, logo ja reunus...",
       "Viimeistellään kuva...",
     ];
     for (const v of vaiheet) {
       setEdistyminen(v);
-      await new Promise((r) => setTimeout(r, 1000));
+      await new Promise((r) => setTimeout(r, 1500));
     }
   }
 

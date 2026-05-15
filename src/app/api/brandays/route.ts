@@ -6,6 +6,7 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
 import { pdfSivuKuvaksi } from "@/lib/pdf";
+import { piirraSVGlla, seinaVari } from "@/lib/svgPiirto";
 
 // Ladataan fontit kerran moduulin käynnistyessä
 const _fontRegularBuf = readFileSync(
@@ -420,8 +421,22 @@ export async function POST(req: NextRequest) {
       tyoBuffer = await parannaKuvanlaatu(tyoBuffer, analyysi.laatu.parannusToimet);
     }
 
-    // ── Vaihe 4: Seinien värinvaihto brändiväriksi ───────────────────────────
-    tyoBuffer = await vaihdaseinatVari(tyoBuffer, brandi.ensisijainenVari);
+    // ── Vaihe 4: Claude SVG-uudelleenpiirto (puhtaat arkkitehtuurisymbolit) ──
+    const wVari = seinaVari(brandi.ensisijainenVari);
+    const svgBuffer = await piirraSVGlla(
+      tyoBuffer.toString("base64"),
+      wVari,
+      leveys,
+      korkeus
+    );
+
+    if (svgBuffer) {
+      // SVG onnistui – käytetään sitä pohjana
+      tyoBuffer = svgBuffer;
+    } else {
+      // Fallback: pikselipohjainen värinvaihto (ei API-avainta tai SVG epäonnistui)
+      tyoBuffer = await vaihdaseinatVari(tyoBuffer, wVari);
+    }
 
     // ── Vaihe 5: Footer + reunus + logo ──────────────────────────────────────
     const footerKorkeus = Math.min(120, Math.max(70, analyysi.pohjakuva.suositeltuFooterKorkeus));
