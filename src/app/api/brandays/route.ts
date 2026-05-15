@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import sharp from "sharp";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
+import { pdfSivuKuvaksi } from "@/lib/pdf";
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -133,8 +134,26 @@ export async function POST(req: NextRequest) {
       ? { ...oletusAsetukset, ...JSON.parse(brandiJSON) }
       : oletusAsetukset;
 
-    const kuvaBuffer = Buffer.from(await kuvatiedosto.arrayBuffer());
-    const mediaType = kuvatiedosto.type as "image/png" | "image/jpeg" | "image/webp";
+    let kuvaBuffer = Buffer.from(await kuvatiedosto.arrayBuffer()) as Buffer<ArrayBuffer>;
+    const onPDF = kuvatiedosto.type === "application/pdf";
+    let pdfSivuja = 1;
+
+    // Muunna PDF ensimmäiseksi sivuksi
+    if (onPDF) {
+      try {
+        const tulos = await pdfSivuKuvaksi(kuvaBuffer, 1);
+        kuvaBuffer = tulos.buffer;
+        pdfSivuja = tulos.sivuja;
+      } catch (pdfErr) {
+        console.error("PDF-muunnos epäonnistui:", pdfErr);
+        return NextResponse.json(
+          { virhe: "PDF-tiedoston käsittely epäonnistui. Kokeile tallentaa pohjakuva PNG-muodossa." },
+          { status: 400 }
+        );
+      }
+    }
+
+    const mediaType = "image/png";
 
     // Kuvan metadata
     const metadata = await sharp(kuvaBuffer).metadata();
@@ -145,6 +164,8 @@ export async function POST(req: NextRequest) {
     const normalisoituBuffer = await sharp(kuvaBuffer)
       .png()
       .toBuffer();
+
+    void pdfSivuja; // käytetään tulevaisuudessa monisivuiseen tukeen
 
     // Claude-analyysi (jos API-avain asetettu)
     let analyysi: PohjakuvaAnalyysi = {

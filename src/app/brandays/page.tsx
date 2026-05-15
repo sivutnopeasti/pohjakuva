@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import Link from "next/link";
-import { ArrowLeft, Upload, Zap, AlertCircle, Loader2 } from "lucide-react";
+import { ArrowLeft, Upload, Zap, AlertCircle, Loader2, FileText } from "lucide-react";
 
 type Vaihe = "lataus" | "kasittely" | "valmis" | "virhe";
 
@@ -17,21 +17,26 @@ export default function BrandaysSivu() {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const kasitteleTiedosto = useCallback((file: File) => {
-    const sallitut = ["image/png", "image/jpeg", "image/jpg", "image/webp"];
+    const sallitut = ["image/png", "image/jpeg", "image/jpg", "image/webp", "application/pdf"];
     if (!sallitut.includes(file.type)) {
-      setVirheViesti("Tuetut formaatit: PNG, JPG, WEBP");
+      setVirheViesti("Tuetut formaatit: PNG, JPG, WEBP, PDF");
       setVaihe("virhe");
       return;
     }
-    if (file.size > 20 * 1024 * 1024) {
-      setVirheViesti("Tiedosto on liian suuri (max 20 Mt)");
+    if (file.size > 30 * 1024 * 1024) {
+      setVirheViesti("Tiedosto on liian suuri (max 30 Mt)");
       setVaihe("virhe");
       return;
     }
     setTiedosto(file);
-    const reader = new FileReader();
-    reader.onload = (e) => setEsikatselu(e.target?.result as string);
-    reader.readAsDataURL(file);
+    if (file.type === "application/pdf") {
+      // PDF:lle näytetään ikonin sijaan placeholder
+      setEsikatselu("pdf");
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => setEsikatselu(e.target?.result as string);
+      reader.readAsDataURL(file);
+    }
     setVaihe("lataus");
   }, []);
 
@@ -133,12 +138,19 @@ export default function BrandaysSivu() {
             >
               {tiedosto && esikatselu ? (
                 <div className="flex items-center gap-4">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={esikatselu}
-                    alt="Esikatselu"
-                    className="w-24 h-24 object-contain rounded-lg bg-gray-100 p-1"
-                  />
+                  {esikatselu === "pdf" ? (
+                    <div className="w-24 h-24 flex flex-col items-center justify-center rounded-lg bg-red-50 border border-red-200">
+                      <FileText className="w-8 h-8 text-red-500 mb-1" />
+                      <span className="text-xs text-red-600 font-medium">PDF</span>
+                    </div>
+                  ) : (
+                    /* eslint-disable-next-line @next/next/no-img-element */
+                    <img
+                      src={esikatselu}
+                      alt="Esikatselu"
+                      className="w-24 h-24 object-contain rounded-lg bg-gray-100 p-1"
+                    />
+                  )}
                   <div className="flex-1">
                     <p className="font-medium text-gray-900">{tiedosto.name}</p>
                     <p className="text-sm text-gray-500">
@@ -163,7 +175,7 @@ export default function BrandaysSivu() {
                   <p className="text-gray-700 font-medium">
                     Vedä pohjakuva tähän tai klikkaa
                   </p>
-                  <p className="text-sm text-gray-500 mt-1">PNG, JPG, WEBP – max 20 Mt</p>
+                  <p className="text-sm text-gray-500 mt-1">PNG, JPG, WEBP, PDF – max 30 Mt</p>
                 </div>
               )}
             </div>
@@ -177,6 +189,14 @@ export default function BrandaysSivu() {
                 if (f) kasitteleTiedosto(f);
               }}
             />
+
+            {/* PDF-huomio */}
+            {tiedosto?.type === "application/pdf" && (
+              <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm text-blue-700">
+                <FileText className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <span>PDF muunnetaan automaattisesti – käytetään ensimmäistä sivua pohjakuvana.</span>
+              </div>
+            )}
 
             {/* Virheviesti */}
             {vaihe === "virhe" && virheViesti && (
