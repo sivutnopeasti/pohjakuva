@@ -4,127 +4,212 @@ import sharp from "sharp";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
 import { pdfSivuKuvaksi } from "@/lib/pdf";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+export const maxDuration = 60;
 
-interface PohjakuvaAnalyysi {
-  pohjakuvanRajat: {
-    x: number;
-    y: number;
-    leveys: number;
-    korkeus: number;
-  } | null;
-  huoneet: string[];
-  onTekstia: boolean;
-  suositeltuFooterKorkeus: number;
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─── Tyypit ──────────────────────────────────────────────────────────────────
+
+interface ClaudeAnalyysi {
+  // Laatu
+  laatu: {
+    pisteet: number;           // 0–100
+    ongelmat: string[];        // "blurry" | "low_contrast" | "noisy" | "low_resolution" | "skewed"
+    tarvitseeParannuksen: boolean;
+    parannusToimet: string[];  // "sharpen" | "normalize" | "median" | "deskew"
+  };
+  // Pohjakuva
+  pohjakuva: {
+    huoneet: string[];
+    suositeltuFooterKorkeus: number;
+    seiniaTunnistettu: boolean;
+  };
 }
 
-async function analysoidPohjakuva(
-  base64Kuva: string,
-  mediaType: "image/png" | "image/jpeg" | "image/webp",
-  kuvanLeveys: number,
-  kuvanKorkeus: number
-): Promise<PohjakuvaAnalyysi> {
+// ─── Claude: laaduntarkistus + analyysi yhdessä kutsossa ─────────────────────
+
+async function analysoidKuvanlaatu(
+  base64: string,
+  leveys: number,
+  korkeus: number
+): Promise<ClaudeAnalyysi> {
+  const oletusVastaus: ClaudeAnalyysi = {
+    laatu: {
+      pisteet: 75,
+      ongelmat: [],
+      tarvitseeParannuksen: false,
+      parannusToimet: [],
+    },
+    pohjakuva: {
+      huoneet: [],
+      suositeltuFooterKorkeus: Math.max(60, Math.round(korkeus * 0.07)),
+      seiniaTunnistettu: true,
+    },
+  };
+
+  if (!process.env.ANTHROPIC_API_KEY) return oletusVastaus;
+
   try {
     const vastaus = await anthropic.messages.create({
       model: "claude-opus-4-5",
-      max_tokens: 500,
+      max_tokens: 600,
       messages: [
         {
           role: "user",
           content: [
             {
               type: "image",
-              source: {
-                type: "base64",
-                media_type: mediaType,
-                data: base64Kuva,
-              },
+              source: { type: "base64", media_type: "image/png", data: base64 },
             },
             {
               type: "text",
-              text: `Analysoi tämä kiinteistön pohjakuva ja vastaa VAIN JSON-muodossa ilman muuta tekstiä:
+              text: `Analysoi tämä kiinteistön pohjakuva kahdelta kannalta ja vastaa VAIN JSON-muodossa:
+
 {
-  "pohjakuvanRajat": {"x": 0, "y": 0, "leveys": ${kuvanLeveys}, "korkeus": ${kuvanKorkeus}},
-  "huoneet": ["lista huoneista jos tunnistettavissa"],
-  "onTekstia": true,
-  "suositeltuFooterKorkeus": 80
+  "laatu": {
+    "pisteet": 85,
+    "ongelmat": [],
+    "tarvitseeParannuksen": false,
+    "parannusToimet": []
+  },
+  "pohjakuva": {
+    "huoneet": ["Olohuone", "Makuuhuone 1"],
+    "suositeltuFooterKorkeus": 80,
+    "seiniaTunnistettu": true
+  }
 }
 
-Suositeltu footer-korkeus: 60-100px riippuen kuvan koosta (${kuvanKorkeus}px korkea).`,
+Ohjeet:
+- laatu.pisteet: 0-100 (alle 65 = tarvitsee parannuksen)
+- laatu.ongelmat: lista ongelmista kuten "blurry", "low_contrast", "noisy", "low_resolution", "skewed"
+- laatu.parannusToimet: lista toimenpiteistä: "sharpen" (sumuinen/epäterävä), "normalize" (heikko kontrasti), "median" (kohinainen/rasterijälki), "deskew" (vino skannaus)
+- pohjakuva.suositeltuFooterKorkeus: 60-100px kuvan korkeuteen (${korkeus}px) suhteutettuna
+- pohjakuva.seiniaTunnistettu: true jos kuvassa on selkeät tummat seinälinjat`,
             },
           ],
         },
       ],
     });
 
-    const tekstiVastaus =
+    const teksti =
       vastaus.content[0].type === "text" ? vastaus.content[0].text : "";
-    const jsonMatch = tekstiVastaus.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]) as PohjakuvaAnalyysi;
-    }
+    const jsonMatch = teksti.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]) as ClaudeAnalyysi;
   } catch (err) {
     console.error("Claude-analyysi epäonnistui:", err);
   }
 
-  // Oletusarvo jos analyysi epäonnistuu
-  return {
-    pohjakuvanRajat: null,
-    huoneet: [],
-    onTekstia: true,
-    suositeltuFooterKorkeus: Math.max(60, Math.round(kuvanKorkeus * 0.07)),
-  };
+  return oletusVastaus;
 }
+
+// ─── Sharp: kuvanlaadun parannus ──────────────────────────────────────────────
+
+async function parannaKuvanlaatu(
+  buffer: Buffer,
+  toimet: string[]
+): Promise<Buffer> {
+  let pipeline = sharp(buffer);
+
+  // Järjestys: median ensin (poistaa kohina), sitten terävöinti, sitten kontrasti
+  if (toimet.includes("median")) {
+    pipeline = pipeline.median(3);
+  }
+
+  if (toimet.includes("sharpen")) {
+    // Voimakas terävöinti pohjakuville: korostaa viivoja ja tekstiä
+    pipeline = pipeline.sharpen({ sigma: 1.8, m1: 0.5, m2: 3.0, x1: 2, y2: 15, y3: 15 });
+  }
+
+  if (toimet.includes("normalize")) {
+    pipeline = pipeline.normalize();
+  }
+
+  // Clahe parantaa paikallista kontrastia (hyvä huonolaatuisille skannauksille)
+  if (toimet.includes("normalize") || toimet.includes("low_contrast")) {
+    pipeline = pipeline.clahe({ width: 8, height: 8, maxSlope: 4 });
+  }
+
+  return pipeline.png().toBuffer();
+}
+
+// ─── Sharp: seinien värinvaihto brändiväriksi ─────────────────────────────────
+
+async function vaihdaseinatVari(
+  buffer: Buffer,
+  seinaVari: string,
+  kynnys = 110   // pikselit joiden luminanssi < kynnys = seinä
+): Promise<Buffer> {
+  const { r: sr, g: sg, b: sb } = hex2rgb(seinaVari);
+
+  const { data, info } = await sharp(buffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width, height, channels } = info;
+  const tulos = Buffer.from(data);
+
+  for (let i = 0; i < width * height; i++) {
+    const o = i * channels;
+    const r = data[o];
+    const g = data[o + 1];
+    const b = data[o + 2];
+
+    // Luminanssi (ihmissilmän painotus)
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+    if (lum < kynnys) {
+      // Tumma pikseli = seinä → brändin ensisijainen väri
+      // Säilytetään alkuperäinen tummuus suhteessa (antaa syvyyttä)
+      const kerroin = lum / kynnys;
+      tulos[o]     = Math.round(sr * kerroin);
+      tulos[o + 1] = Math.round(sg * kerroin);
+      tulos[o + 2] = Math.round(sb * kerroin);
+      // alpha pysyy ennallaan
+    }
+  }
+
+  return sharp(tulos, { raw: { width, height, channels } }).png().toBuffer();
+}
+
+// ─── SVG-apufunktiot ──────────────────────────────────────────────────────────
 
 function hex2rgb(hex: string): { r: number; g: number; b: number } {
-  const cleaned = hex.replace("#", "");
+  const c = hex.replace("#", "");
   return {
-    r: parseInt(cleaned.substring(0, 2), 16),
-    g: parseInt(cleaned.substring(2, 4), 16),
-    b: parseInt(cleaned.substring(4, 6), 16),
+    r: parseInt(c.substring(0, 2), 16),
+    g: parseInt(c.substring(2, 4), 16),
+    b: parseInt(c.substring(4, 6), 16),
   };
 }
 
-function luoFooterSVG(
-  leveys: number,
-  korkeus: number,
-  brandi: BrandiAsetukset
-): string {
-  const taustaVari = brandi.ensisijainenVari;
-  const korostusVari = brandi.toissijaineVari;
-  const tekstiVari = brandi.tekstiVari;
-  const nimi = brandi.yritysNimi || "Kiinteistövälitys";
-  const slogan = brandi.slogan;
-  const puhelin = brandi.puhelinnumero;
-  const sahkoposti = brandi.sahkoposti;
-  const verkko = brandi.verkkosivusto;
-
-  const yhteystiedot = [puhelin, sahkoposti, verkko].filter(Boolean).join("  |  ");
-
+function luoFooterSVG(leveys: number, korkeus: number, brandi: BrandiAsetukset): string {
+  const yhteystiedot = [brandi.puhelinnumero, brandi.sahkoposti, brandi.verkkosivusto]
+    .filter(Boolean).join("  |  ");
   return `<svg width="${leveys}" height="${korkeus}" xmlns="http://www.w3.org/2000/svg">
-    <rect width="${leveys}" height="${korkeus}" fill="${taustaVari}"/>
-    <rect x="0" y="0" width="6" height="${korkeus}" fill="${korostusVari}"/>
-    <text x="20" y="${korkeus * 0.42}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.32)}px" font-weight="bold" fill="${tekstiVari}">${nimi}</text>
-    ${slogan ? `<text x="20" y="${korkeus * 0.72}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.2)}px" fill="${tekstiVari}" opacity="0.8">${slogan}</text>` : ""}
-    ${yhteystiedot ? `<text x="${leveys - 20}" y="${korkeus * 0.55}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.18)}px" fill="${tekstiVari}" opacity="0.85" text-anchor="end">${yhteystiedot}</text>` : ""}
+    <rect width="${leveys}" height="${korkeus}" fill="${brandi.ensisijainenVari}"/>
+    <rect x="0" y="0" width="6" height="${korkeus}" fill="${brandi.toissijaineVari}"/>
+    <text x="20" y="${korkeus * 0.42}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.32)}px" font-weight="bold" fill="${brandi.tekstiVari}">${brandi.yritysNimi || "Kiinteistövälitys"}</text>
+    ${brandi.slogan ? `<text x="20" y="${korkeus * 0.72}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.2)}px" fill="${brandi.tekstiVari}" opacity="0.8">${brandi.slogan}</text>` : ""}
+    ${yhteystiedot ? `<text x="${leveys - 20}" y="${korkeus * 0.55}" font-family="Arial, sans-serif" font-size="${Math.round(korkeus * 0.18)}px" fill="${brandi.tekstiVari}" opacity="0.85" text-anchor="end">${yhteystiedot}</text>` : ""}
   </svg>`;
 }
 
 function luoReunusSVG(leveys: number, korkeus: number, vari: string): string {
-  const paksuus = Math.max(4, Math.round(Math.min(leveys, korkeus) * 0.006));
+  const p = Math.max(4, Math.round(Math.min(leveys, korkeus) * 0.006));
   return `<svg width="${leveys}" height="${korkeus}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="${paksuus / 2}" y="${paksuus / 2}" width="${leveys - paksuus}" height="${korkeus - paksuus}" 
-      fill="none" stroke="${vari}" stroke-width="${paksuus}" rx="0"/>
+    <rect x="${p / 2}" y="${p / 2}" width="${leveys - p}" height="${korkeus - p}"
+      fill="none" stroke="${vari}" stroke-width="${p}"/>
   </svg>`;
 }
+
+// ─── Pääreitti ────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const kuvatiedosto = formData.get("kuva") as File | null;
-    const brandiJSON = formData.get("brandi") as string | null;
+    const brandiJSON   = formData.get("brandi") as string | null;
 
     if (!kuvatiedosto) {
       return NextResponse.json({ virhe: "Kuvaa ei löydy" }, { status: 400 });
@@ -134,132 +219,87 @@ export async function POST(req: NextRequest) {
       ? { ...oletusAsetukset, ...JSON.parse(brandiJSON) }
       : oletusAsetukset;
 
+    // ── Vaihe 1: PDF → PNG ───────────────────────────────────────────────────
     let kuvaBuffer = Buffer.from(await kuvatiedosto.arrayBuffer()) as Buffer<ArrayBuffer>;
-    const onPDF = kuvatiedosto.type === "application/pdf";
-    let pdfSivuja = 1;
 
-    // Muunna PDF ensimmäiseksi sivuksi
-    if (onPDF) {
+    if (kuvatiedosto.type === "application/pdf") {
       try {
         const tulos = await pdfSivuKuvaksi(kuvaBuffer, 1);
         kuvaBuffer = tulos.buffer;
-        pdfSivuja = tulos.sivuja;
-      } catch (pdfErr) {
-        console.error("PDF-muunnos epäonnistui:", pdfErr);
+      } catch {
         return NextResponse.json(
-          { virhe: "PDF-tiedoston käsittely epäonnistui. Kokeile tallentaa pohjakuva PNG-muodossa." },
+          { virhe: "PDF-muunnos epäonnistui. Kokeile PNG-muotoa." },
           { status: 400 }
         );
       }
     }
 
-    const mediaType = "image/png";
-
-    // Kuvan metadata
-    const metadata = await sharp(kuvaBuffer).metadata();
-    const leveys = metadata.width ?? 1200;
+    // Normalisoi PNG:ksi
+    let tyoBuffer: Buffer = await sharp(kuvaBuffer).png().toBuffer();
+    const metadata = await sharp(tyoBuffer).metadata();
+    const leveys  = metadata.width  ?? 1200;
     const korkeus = metadata.height ?? 900;
 
-    // Normalisoi PNG:ksi
-    const normalisoituBuffer = await sharp(kuvaBuffer)
-      .png()
-      .toBuffer();
+    // ── Vaihe 2: Claude – laaduntarkistus + analyysi ─────────────────────────
+    const base64   = tyoBuffer.toString("base64");
+    const analyysi = await analysoidKuvanlaatu(base64, leveys, korkeus);
 
-    void pdfSivuja; // käytetään tulevaisuudessa monisivuiseen tukeen
-
-    // Claude-analyysi (jos API-avain asetettu)
-    let analyysi: PohjakuvaAnalyysi = {
-      pohjakuvanRajat: null,
-      huoneet: [],
-      onTekstia: true,
-      suositeltuFooterKorkeus: Math.max(60, Math.round(korkeus * 0.07)),
-    };
-
-    if (process.env.ANTHROPIC_API_KEY) {
-      const base64 = normalisoituBuffer.toString("base64");
-      analyysi = await analysoidPohjakuva(base64, "image/png", leveys, korkeus);
+    // ── Vaihe 3: Kuvanlaadun parannus (jos tarpeen) ──────────────────────────
+    if (analyysi.laatu.tarvitseeParannuksen && analyysi.laatu.parannusToimet.length > 0) {
+      tyoBuffer = await parannaKuvanlaatu(tyoBuffer, analyysi.laatu.parannusToimet);
     }
 
-    const footerKorkeus = Math.min(
-      120,
-      Math.max(60, analyysi.suositeltuFooterKorkeus)
-    );
-    const uusiKorkeus = korkeus + footerKorkeus;
+    // ── Vaihe 4: Seinien värinvaihto brändiväriksi ───────────────────────────
+    tyoBuffer = await vaihdaseinatVari(tyoBuffer, brandi.ensisijainenVari);
 
-    // Luo footer SVG
-    const footerSVG = luoFooterSVG(leveys, footerKorkeus, brandi);
-    const footerBuffer = Buffer.from(footerSVG);
+    // ── Vaihe 5: Footer + reunus + logo ──────────────────────────────────────
+    const footerKorkeus = Math.min(120, Math.max(60, analyysi.pohjakuva.suositeltuFooterKorkeus));
+    const uusiKorkeus   = korkeus + footerKorkeus;
 
-    // Luo reunus SVG (koko kuvaan footerin kanssa)
-    const reunusSVG = luoReunusSVG(leveys, uusiKorkeus, brandi.toissijaineVari);
-    const reunusBuffer = Buffer.from(reunusSVG);
-
-    // Kokoa kuva: alkuperäinen + footer + reunus
     const composites: sharp.OverlayOptions[] = [
-      {
-        input: footerBuffer,
-        top: korkeus,
-        left: 0,
-      },
-      {
-        input: reunusBuffer,
-        top: 0,
-        left: 0,
-      },
+      { input: Buffer.from(luoFooterSVG(leveys, footerKorkeus, brandi)), top: korkeus, left: 0 },
+      { input: Buffer.from(luoReunusSVG(leveys, uusiKorkeus, brandi.toissijaineVari)), top: 0, left: 0 },
     ];
 
-    // Lisää logo jos olemassa
+    // Logo footeriin
     if (brandi.logo) {
       try {
         const logoBase64 = brandi.logo.split(",")[1];
         const logoBuffer = Buffer.from(logoBase64, "base64");
-        const logoMetadata = await sharp(logoBuffer).metadata();
-        const logoMaxKorkeus = Math.round(footerKorkeus * 0.75);
-        const logoMaxLeveys = Math.round(leveys * 0.15);
+        const logoMaxH   = Math.round(footerKorkeus * 0.75);
+        const logoMaxW   = Math.round(leveys * 0.15);
 
-        const logoKuva = await sharp(logoBuffer)
-          .resize(logoMaxLeveys, logoMaxKorkeus, {
-            fit: "inside",
-            withoutEnlargement: true,
-          })
-          .png()
-          .toBuffer();
+        const logoResized = await sharp(logoBuffer)
+          .resize(logoMaxW, logoMaxH, { fit: "inside", withoutEnlargement: true })
+          .png().toBuffer();
 
-        const logoMeta = await sharp(logoKuva).metadata();
-        const logoLeveys = logoMeta.width ?? logoMaxLeveys;
-        const logoKorkeus2 = logoMeta.height ?? logoMaxKorkeus;
-        const logoVasen = leveys - logoLeveys - 16;
-        const logoYlos = korkeus + Math.round((footerKorkeus - logoKorkeus2) / 2);
+        const logoMeta = await sharp(logoResized).metadata();
+        const lw = logoMeta.width  ?? logoMaxW;
+        const lh = logoMeta.height ?? logoMaxH;
 
         composites.push({
-          input: logoKuva,
-          top: logoYlos,
-          left: logoVasen,
+          input: logoResized,
+          top:  korkeus + Math.round((footerKorkeus - lh) / 2),
+          left: leveys - lw - 16,
         });
       } catch (logoErr) {
         console.error("Logo-käsittely epäonnistui:", logoErr);
       }
     }
 
-    // Rakenna lopullinen kuva
-    const lopullinenBuffer = await sharp({
-      create: {
-        width: leveys,
-        height: uusiKorkeus,
-        channels: 4,
-        background: { r: 255, g: 255, b: 255, alpha: 1 },
-      },
+    // ── Vaihe 6: Kokoa lopullinen kuva ───────────────────────────────────────
+    const lopullinen = await sharp({
+      create: { width: leveys, height: uusiKorkeus, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } },
     })
-      .composite([
-        { input: normalisoituBuffer, top: 0, left: 0 },
-        ...composites,
-      ])
+      .composite([{ input: tyoBuffer, top: 0, left: 0 }, ...composites])
       .png()
       .toBuffer();
 
-    const base64Tulos = `data:image/png;base64,${lopullinenBuffer.toString("base64")}`;
-
-    return NextResponse.json({ kuva: base64Tulos });
+    return NextResponse.json({
+      kuva: `data:image/png;base64,${lopullinen.toString("base64")}`,
+      // Palautetaan myös tietoja käyttöliittymälle
+      laatu: analyysi.laatu,
+    });
   } catch (err) {
     console.error("Brändäysvirhe:", err);
     return NextResponse.json(
@@ -268,5 +308,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-
-export const maxDuration = 60;

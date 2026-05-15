@@ -6,11 +6,19 @@ import { ArrowLeft, Upload, Zap, AlertCircle, Loader2, FileText } from "lucide-r
 
 type Vaihe = "lataus" | "kasittely" | "valmis" | "virhe";
 
+interface LaaturaporttI {
+  pisteet: number;
+  ongelmat: string[];
+  tarvitseeParannuksen: boolean;
+  parannusToimet: string[];
+}
+
 export default function BrandaysSivu() {
   const [vaihe, setVaihe] = useState<Vaihe>("lataus");
   const [tiedosto, setTiedosto] = useState<File | null>(null);
   const [esikatselu, setEsikatselu] = useState<string | null>(null);
   const [tulos, setTulos] = useState<string | null>(null);
+  const [laatu, setLaatu] = useState<LaaturaporttI | null>(null);
   const [virheViesti, setVirheViesti] = useState<string>("");
   const [raahaus, setRaahaus] = useState(false);
   const [edistyminen, setEdistyminen] = useState<string>("");
@@ -49,15 +57,16 @@ export default function BrandaysSivu() {
 
   async function kaynnistaEdistyminen() {
     const vaiheet = [
-      "Analysoidaan pohjakuvaa tekoälyllä...",
-      "Tunnistetaan huoneet ja mitat...",
-      "Haetaan brändiasetuket...",
-      "Lisätään footer ja logo...",
+      "Tarkistetaan kuvanlaatu tekoälyllä...",
+      "Tunnistetaan seinät, huoneet ja mitat...",
+      "Parannetaan kuvanlaatua tarvittaessa...",
+      "Vaihdetaan seinien väri brändiväriksi...",
+      "Lisätään footer, logo ja reunus...",
       "Viimeistellään kuva...",
     ];
     for (const v of vaiheet) {
       setEdistyminen(v);
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 
@@ -88,6 +97,7 @@ export default function BrandaysSivu() {
 
       const data = await vastaus.json();
       setTulos(data.kuva);
+      if (data.laatu) setLaatu(data.laatu);
       setVaihe("valmis");
     } catch (err) {
       setVirheViesti(err instanceof Error ? err.message : "Virhe käsittelyssä");
@@ -233,6 +243,33 @@ export default function BrandaysSivu() {
         {/* Valmis */}
         {vaihe === "valmis" && tulos && (
           <div className="space-y-6">
+            {/* Laaturaportti */}
+            {laatu && (
+              <div className={`rounded-xl border px-5 py-4 flex items-start gap-3 text-sm
+                ${laatu.tarvitseeParannuksen
+                  ? "bg-amber-50 border-amber-200 text-amber-800"
+                  : "bg-green-50 border-green-200 text-green-800"}`}>
+                <div className="flex-shrink-0 mt-0.5">
+                  {laatu.tarvitseeParannuksen ? (
+                    <AlertCircle className="w-4 h-4" />
+                  ) : (
+                    <Zap className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <span className="font-semibold">
+                    Kuvanlaatu: {laatu.pisteet}/100
+                    {laatu.tarvitseeParannuksen ? " – parannettiin automaattisesti" : " – hyvä"}
+                  </span>
+                  {laatu.parannusToimet.length > 0 && (
+                    <p className="mt-0.5 opacity-80">
+                      Toimenpiteet: {laatu.parannusToimet.join(", ")}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
               <div className="bg-green-50 border-b border-green-200 px-6 py-3 flex items-center gap-2">
                 <Zap className="w-4 h-4 text-green-600" />
@@ -258,6 +295,7 @@ export default function BrandaysSivu() {
                   setTiedosto(null);
                   setEsikatselu(null);
                   setTulos(null);
+                  setLaatu(null);
                 }}
                 className="flex-1 flex items-center justify-center gap-2 bg-white border border-gray-300 hover:border-gray-400 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
               >
