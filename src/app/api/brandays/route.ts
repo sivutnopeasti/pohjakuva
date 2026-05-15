@@ -1,9 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import sharp from "sharp";
-import { createCanvas, loadImage } from "canvas";
+import satori from "satori";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { BrandiAsetukset, oletusAsetukset } from "@/lib/brandi";
 import { pdfSivuKuvaksi } from "@/lib/pdf";
+
+// Ladataan fontit kerran käynnistyksessä
+const fontRegular = readFileSync(
+  join(process.cwd(), "node_modules/roboto-fontface/fonts/roboto/Roboto-Regular.woff")
+);
+const fontBold = readFileSync(
+  join(process.cwd(), "node_modules/roboto-fontface/fonts/roboto/Roboto-Bold.woff")
+);
 
 export const maxDuration = 60;
 
@@ -184,84 +194,166 @@ function hex2rgb(hex: string): { r: number; g: number; b: number } {
   };
 }
 
-async function luoFooterCanvas(
+async function luoFooterSatori(
   leveys: number,
   korkeus: number,
   brandi: BrandiAsetukset
 ): Promise<Buffer> {
-  const canvas = createCanvas(leveys, korkeus);
-  const ctx = canvas.getContext("2d");
-
-  // Tausta
-  ctx.fillStyle = brandi.ensisijainenVari;
-  ctx.fillRect(0, 0, leveys, korkeus);
-
-  // Vasen korostusraita
-  ctx.fillStyle = brandi.toissijaineVari;
-  ctx.fillRect(0, 0, 6, korkeus);
-
-  // Varataan logotila oikeaan reunaan
-  const logoAlue = brandi.logo ? Math.round(leveys * 0.20) : 0;
-  const tekstiMaxX = leveys - logoAlue - 20;
-
-  ctx.fillStyle = brandi.tekstiVari;
-
-  // Yrityksen nimi
-  const nimiKoko = Math.round(korkeus * 0.36);
-  ctx.font = `bold ${nimiKoko}px Arial`;
-  ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  ctx.fillText(brandi.yritysNimi || "Kiinteistövälitys", 20, Math.round(korkeus * 0.47));
-
-  // Slogan
-  if (brandi.slogan) {
-    const sloganKoko = Math.round(korkeus * 0.22);
-    ctx.font = `${sloganKoko}px Arial`;
-    ctx.globalAlpha = 0.8;
-    ctx.fillText(brandi.slogan, 20, Math.round(korkeus * 0.77));
-    ctx.globalAlpha = 1;
-  }
-
-  // Yhteystiedot (oikea puoli, logon vasemmalle puolelle)
+  const nimi = brandi.yritysNimi || "Kiinteistövälitys";
   const yhteystiedot = [brandi.puhelinnumero, brandi.sahkoposti, brandi.verkkosivusto]
     .filter(Boolean).join("  |  ");
-  if (yhteystiedot) {
-    const yhteysKoko = Math.round(korkeus * 0.19);
-    ctx.font = `${yhteysKoko}px Arial`;
-    ctx.textAlign = "right";
-    ctx.globalAlpha = 0.85;
-    ctx.fillText(yhteystiedot, tekstiMaxX, Math.round(korkeus * 0.58));
-    ctx.globalAlpha = 1;
-    ctx.textAlign = "left";
-  }
 
-  // Logo oikeaan alakulmaan footerin sisälle
+  // Logo base64 data URI
+  let logoDataUri: string | null = null;
+  let logoLeveys = 0;
+  let logoKorkeus2 = 0;
+
   if (brandi.logo) {
     try {
       const logoBase64 = brandi.logo.split(",")[1];
-      const logoBuffer = Buffer.from(logoBase64, "base64");
-      const logoMaxH = Math.round(korkeus * 0.72);
-      const logoMaxW = Math.round(logoAlue * 0.88);
-
-      const logoResized = await sharp(logoBuffer)
-        .resize(logoMaxW, logoMaxH, { fit: "inside", withoutEnlargement: true })
+      const logoRaw = Buffer.from(logoBase64, "base64");
+      // Skaalataan logo: korkeus = footerin korkeus - 16px marginaali
+      const logoMaxH = korkeus - 16;
+      const logoMaxW = Math.round(leveys * 0.22);
+      const logoResized = await sharp(logoRaw)
+        .resize(logoMaxW, logoMaxH, { fit: "inside", withoutEnlargement: false })
         .png()
         .toBuffer();
-
-      const logoMeta = await sharp(logoResized).metadata();
-      const lw = logoMeta.width  ?? logoMaxW;
-      const lh = logoMeta.height ?? logoMaxH;
-
-      const logoImg = await loadImage(logoResized);
-      const logoX = leveys - lw - 14;
-      const logoY = Math.round((korkeus - lh) / 2);
-      ctx.drawImage(logoImg, logoX, logoY, lw, lh);
-    } catch (logoErr) {
-      console.error("Logo-piirto epäonnistui:", logoErr);
+      const m = await sharp(logoResized).metadata();
+      logoLeveys = m.width ?? logoMaxW;
+      logoKorkeus2 = m.height ?? logoMaxH;
+      logoDataUri = `data:image/png;base64,${logoResized.toString("base64")}`;
+    } catch (e) {
+      console.error("Logo-esikäsittely epäonnistui:", e);
     }
   }
 
-  return canvas.toBuffer("image/png") as Buffer;
+  // Satori-layout: flex row, vasen teksti + oikea logo
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const layout: any = {
+    type: "div",
+    props: {
+      style: {
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        width: leveys,
+        height: korkeus,
+        backgroundColor: brandi.ensisijainenVari,
+        position: "relative",
+        overflow: "hidden",
+      },
+      children: [
+        // Vasen korostusraita
+        {
+          type: "div",
+          props: {
+            style: {
+              position: "absolute",
+              left: 0, top: 0,
+              width: 6,
+              height: korkeus,
+              backgroundColor: brandi.toissijaineVari,
+            },
+            children: [],
+          },
+        },
+        // Tekstit
+        {
+          type: "div",
+          props: {
+            style: {
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "center",
+              paddingLeft: 20,
+              flex: 1,
+              height: korkeus,
+              gap: 4,
+            },
+            children: [
+              {
+                type: "div",
+                props: {
+                  style: {
+                    fontSize: Math.round(korkeus * 0.36),
+                    fontWeight: 700,
+                    color: brandi.tekstiVari,
+                    fontFamily: "Roboto",
+                    lineHeight: 1.2,
+                  },
+                  children: [nimi],
+                },
+              },
+              brandi.slogan ? {
+                type: "div",
+                props: {
+                  style: {
+                    fontSize: Math.round(korkeus * 0.22),
+                    fontWeight: 400,
+                    color: brandi.tekstiVari,
+                    fontFamily: "Roboto",
+                    opacity: 0.8,
+                  },
+                  children: [brandi.slogan],
+                },
+              } : null,
+              yhteystiedot ? {
+                type: "div",
+                props: {
+                  style: {
+                    fontSize: Math.round(korkeus * 0.18),
+                    fontWeight: 400,
+                    color: brandi.tekstiVari,
+                    fontFamily: "Roboto",
+                    opacity: 0.75,
+                    marginTop: 2,
+                  },
+                  children: [yhteystiedot],
+                },
+              } : null,
+            ].filter(Boolean),
+          },
+        },
+        // Logo oikeaan reunaan
+        logoDataUri ? {
+          type: "div",
+          props: {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              paddingRight: 16,
+              height: korkeus,
+              flexShrink: 0,
+            },
+            children: [
+              {
+                type: "img",
+                props: {
+                  src: logoDataUri,
+                  width: logoLeveys,
+                  height: logoKorkeus2,
+                  style: { objectFit: "contain" },
+                },
+              },
+            ],
+          },
+        } : null,
+      ].filter(Boolean),
+    },
+  };
+
+  const svg = await satori(layout, {
+    width: leveys,
+    height: korkeus,
+    fonts: [
+      { name: "Roboto", data: fontRegular, weight: 400, style: "normal" },
+      { name: "Roboto", data: fontBold,    weight: 700, style: "normal" },
+    ],
+  });
+
+  return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
 function luoReunusSVG(leveys: number, korkeus: number, vari: string): string {
@@ -325,8 +417,8 @@ export async function POST(req: NextRequest) {
     const footerKorkeus = Math.min(120, Math.max(70, analyysi.pohjakuva.suositeltuFooterKorkeus));
     const uusiKorkeus   = korkeus + footerKorkeus;
 
-    // Footer canvas-pohjaisena (ratkaisee fontti- ja logo-ongelmat)
-    const footerBuffer = await luoFooterCanvas(leveys, footerKorkeus, brandi);
+    // Footer Satori-pohjaisena (täysi Unicode-tuki, logo oikeaan reunaan)
+    const footerBuffer = await luoFooterSatori(leveys, footerKorkeus, brandi);
 
     const composites: sharp.OverlayOptions[] = [
       { input: footerBuffer, top: korkeus, left: 0 },
